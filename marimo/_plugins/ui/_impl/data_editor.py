@@ -167,6 +167,7 @@ class data_editor(
         on_change (Optional[Callable]): Optional callback to run when this element's value changes.
         editable_columns (Union[list[str], Literal["all"]]): A list of column names to be editable.
             If "all", all columns are editable. Pass an empty list to make all columns read-only. Defaults to "all".
+        wrapped_columns (list[str] | None): List of column names to wrap.
 
     Deprecated:
         pagination (bool): Whether to enable pagination.
@@ -186,6 +187,7 @@ class data_editor(
         ]
         | None = None,
         editable_columns: list[str] | Literal["all"] = "all",
+        wrapped_columns: list[str] | None = None,
         column_sizing_mode: Literal["auto", "fit"] | None = None,
         pagination: bool | None = None,
         page_size: int | None = None,
@@ -217,6 +219,13 @@ class data_editor(
         elif editable_columns is None:
             editable_columns = []
 
+        if wrapped_columns:
+            invalid_columns = set(wrapped_columns) - set(column_names)
+            if invalid_columns:
+                raise ValueError(
+                    f"Column {next(iter(invalid_columns))} is not in the data"
+                )
+
         super().__init__(
             component_name=data_editor._name,
             label=label,
@@ -225,6 +234,7 @@ class data_editor(
                 "data": mo_data.csv(table_manager.to_csv()).url,
                 "field-types": field_types or None,
                 "editable-columns": editable_columns,
+                "wrapped-columns": wrapped_columns,
                 "column-sizing-mode": "auto",
             },
             on_change=on_change,

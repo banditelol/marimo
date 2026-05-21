@@ -13,7 +13,7 @@ import DataEditor, {
   type Item,
   type Rectangle,
 } from "@glideapps/glide-data-grid";
-import { CopyIcon, TrashIcon } from "lucide-react";
+import { CopyIcon, TrashIcon, WrapTextIcon } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useTheme } from "@/theme/useTheme";
 import { copyToClipboard } from "@/utils/copy";
+import { dequal as isEqual } from "dequal";
 import {
   getColumnHeaderIcon,
   getColumnKind,
@@ -46,6 +47,7 @@ import { ErrorBoundary } from "@/components/editor/boundary/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/use-toast";
 import type { DataType } from "@/core/kernel/messages";
+import { useInternalStateWithSync } from "@/hooks/useInternalStateWithSync";
 import { useNonce } from "@/hooks/useNonce";
 import { logNever } from "@/utils/assertNever";
 import { Events } from "@/utils/events";
@@ -57,12 +59,15 @@ import {
   renameColumn,
 } from "./data-utils";
 
+const WRAPPED_ROW_HEIGHT = 72;
+
 interface GlideDataEditorProps<T> {
   data: T[];
   setData: (data: T[] | ((prev: T[]) => T[])) => void;
   columnFields: FieldTypes;
   setColumnFields: React.Dispatch<React.SetStateAction<FieldTypes>>;
   editableColumns: string[] | "all";
+  wrappedColumns?: string[];
   edits: Edits["edits"];
   onAddEdits: (edits: Edits["edits"]) => void;
   onAddRows: (newRows: object[]) => void;
@@ -78,6 +83,7 @@ export const GlideDataEditor = <T,>({
   columnFields,
   setColumnFields,
   editableColumns,
+  wrappedColumns,
   edits,
   onAddEdits,
   onAddRows,
@@ -97,8 +103,15 @@ export const GlideDataEditor = <T,>({
   });
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [wrappedColumnState, setWrappedColumnState] =
+    useInternalStateWithSync<string[]>(wrappedColumns ?? [], isEqual);
   const rerender = useNonce();
   const hasAppliedEdits = useRef(false);
+
+  const wrappedColumnsSet = useMemo(
+    () => new Set(wrappedColumnState),
+    [wrappedColumnState],
+  );
 
   const columns: ModifiedGridColumn[] = useMemo(() => {
     const columns: ModifiedGridColumn[] = [];
@@ -237,9 +250,10 @@ export const GlideDataEditor = <T,>({
 
       const dataItem = dataRow[columns[col].title as keyof T];
       const columnKind = columns[col].kind;
+      const columnTitle = columns[col].title;
       const editable =
-        editableColumns === "all" ||
-        editableColumns.includes(columns[col].title);
+        editableColumns === "all" || editableColumns.includes(columnTitle);
+      const wrapped = wrappedColumnsSet.has(columnTitle);
 
       if (columnKind === GridCellKind.Boolean) {
         const value = Boolean(dataItem);
@@ -264,12 +278,13 @@ export const GlideDataEditor = <T,>({
       return {
         kind: GridCellKind.Text,
         allowOverlay: editable,
+        allowWrapping: wrapped,
         readonly: !editable,
         displayData: String(dataItem),
         data: String(dataItem),
       };
     },
-    [columns, data, editableColumns],
+    [columns, data, editableColumns, wrappedColumnsSet],
   );
 
   const onCellEdited = useCallback(
@@ -432,6 +447,20 @@ export const GlideDataEditor = <T,>({
     }
   };
 
+  const handleToggleWrapColumn = () => {
+    if (!menu) {
+      return;
+    }
+
+    const columnName = columns[menu.col].title;
+    setWrappedColumnState((prev) =>
+      prev.includes(columnName)
+        ? prev.filter((name) => name !== columnName)
+        : [...prev, columnName],
+    );
+    setMenu(undefined);
+  };
+
   function toastColumnExists(name: string) {
     toast({
       title: `Column '${name}' already exists`,
@@ -453,6 +482,11 @@ export const GlideDataEditor = <T,>({
       const dataType = columns[menu.col].dataType;
 
       onRenameColumn(menu.col, newName);
+      setWrappedColumnState((prev) =>
+        prev.includes(oldColumnName)
+          ? prev.map((name) => (name === oldColumnName ? newName : name))
+          : prev,
+      );
       setColumnFields((prev) =>
         modifyColumnFields({
           columnFields: prev,
@@ -471,7 +505,11 @@ export const GlideDataEditor = <T,>({
 
   const handleDeleteColumn = () => {
     if (menu) {
+      const columnName = columns[menu.col].title;
       onDeleteColumn(menu.col);
+      setWrappedColumnState((prev) =>
+        prev.filter((name) => name !== columnName),
+      );
       setColumnFields((prev) =>
         modifyColumnFields({
           columnFields: prev,
@@ -523,6 +561,10 @@ export const GlideDataEditor = <T,>({
   };
 
   const isLastColumn = menu?.col === columns.length - 1;
+  const selectedColumnName = menu ? columns[menu.col].title : undefined;
+  const isSelectedColumnWrapped = selectedColumnName
+    ? wrappedColumnsSet.has(selectedColumnName)
+    : false;
 
   // There is a guarantee that only one column's menu is open (as interaction is disabled outside of the menu)
   const isMenuOpen = menu !== undefined;
@@ -605,6 +647,11 @@ export const GlideDataEditor = <T,>({
             Copy column name
           </DropdownMenuItem>
 
+          <DropdownMenuItem onClick={handleToggleWrapColumn}>
+            <WrapTextIcon className={iconClassName} />
+            {isSelectedColumnWrapped ? "No wrap text" : "Wrap text"}
+          </DropdownMenuItem>
+
           {!isLargeDataset && bulkEditItems}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -632,6 +679,7 @@ export const GlideDataEditor = <T,>({
           allowedFillDirections="vertical" // We can support all directions, but we need to handle datatype logic
           onKeyDown={onKeyDown}
           height={data.length > 10 ? 450 : undefined}
+          rowHeight={wrappedColumnState.length > 0 ? WRAPPED_ROW_HEIGHT : undefined}
           width={"100%"}
           rowMarkers={{
             kind: "both",

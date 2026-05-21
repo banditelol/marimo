@@ -53,6 +53,7 @@ export const DataEditorPlugin = createPlugin<Edits>("marimo-data-editor", {
         )
         .nullish(),
       editableColumns: z.union([z.array(z.string()), z.literal("all")]),
+      wrappedColumns: z.array(z.string()).optional(),
       columnSizingMode: z.enum(["auto", "fit"]).default("auto"), // TODO: Remove this
     }),
   )
@@ -66,6 +67,7 @@ export const DataEditorPlugin = createPlugin<Edits>("marimo-data-editor", {
         onEdits={props.setValue}
         host={props.host}
         editableColumns={props.data.editableColumns}
+        wrappedColumns={props.data.wrappedColumns}
       />
     );
   });
@@ -79,6 +81,7 @@ interface Props extends Omit<
   onEdits: Setter<Edits>;
   host: HTMLElement;
   editableColumns: string[] | "all";
+  wrappedColumns?: string[];
 }
 
 const LoadingDataEditor = (props: Props) => {
@@ -135,6 +138,7 @@ const LoadingDataEditor = (props: Props) => {
       columnFields={columnFields}
       setColumnFields={setColumnFields}
       editableColumns={props.editableColumns}
+      wrappedColumns={props.wrappedColumns}
       edits={props.edits.edits}
       onAddEdits={(edits) => {
         props.onEdits((v) => ({ ...v, edits: [...v.edits, ...edits] }));

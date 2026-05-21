@@ -74,6 +74,18 @@ def test_data_editor_editable_columns():
 @pytest.mark.skipif(
     not DependencyManager.polars.has(), reason="Polars not installed"
 )
+def test_data_editor_wrapped_columns():
+    data = [{"A": 1, "B": "a"}, {"A": 2, "B": "b"}, {"A": 3, "B": "c"}]
+    editor = data_editor(data=data, wrapped_columns=["B"])
+    assert editor._component_args["wrapped-columns"] == ["B"]
+
+    with pytest.raises(ValueError, match="Column C is not in the data"):
+        data_editor(data=data, wrapped_columns=["C"])
+
+
+@pytest.mark.skipif(
+    not DependencyManager.polars.has(), reason="Polars not installed"
+)
 def test_data_editor_with_column_oriented_data():
     data = {"A": [1, 2, 3], "B": ["a", "b", "c"]}
     editor = data_editor(data=data)
