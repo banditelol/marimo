@@ -40,7 +40,7 @@ import {
   isRowEdit,
   pasteCells,
 } from "./glide-utils";
-import { getGlideTheme } from "./themes";
+import { getGlideTheme, getGlideWrapThemeMetrics } from "./themes";
 import { BulkEdit, type Edits, type ModifiedGridColumn } from "./types";
 import "@glideapps/glide-data-grid/dist/index.css"; // TODO: We are reimporting this
 import { ErrorBoundary } from "@/components/editor/boundary/ErrorBoundary";
@@ -58,8 +58,12 @@ import {
   removeColumn,
   renameColumn,
 } from "./data-utils";
-
-const WRAPPED_ROW_HEIGHT = 72;
+import {
+  estimateWrappedRowHeights,
+  FIXED_WRAPPED_ROW_HEIGHT,
+  getWrappedColumnWidth,
+  type WrappedRowHeightStrategy,
+} from "./wrap-sizing";
 
 interface GlideDataEditorProps<T> {
   data: T[];
@@ -68,6 +72,7 @@ interface GlideDataEditorProps<T> {
   setColumnFields: React.Dispatch<React.SetStateAction<FieldTypes>>;
   editableColumns: string[] | "all";
   wrappedColumns?: string[];
+  wrappedRowHeightStrategy?: WrappedRowHeightStrategy;
   edits: Edits["edits"];
   onAddEdits: (edits: Edits["edits"]) => void;
   onAddRows: (newRows: object[]) => void;
@@ -84,6 +89,7 @@ export const GlideDataEditor = <T,>({
   setColumnFields,
   editableColumns,
   wrappedColumns,
+  wrappedRowHeightStrategy = "measureText",
   edits,
   onAddEdits,
   onAddRows,
@@ -105,12 +111,39 @@ export const GlideDataEditor = <T,>({
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [wrappedColumnState, setWrappedColumnState] =
     useInternalStateWithSync<string[]>(wrappedColumns ?? [], isEqual);
+  const [fitHeightColumns, setFitHeightColumns] = useState<string[]>([]);
+  const [fittedRowHeights, setFittedRowHeights] = useState<number[] | undefined>();
   const rerender = useNonce();
   const hasAppliedEdits = useRef(false);
 
   const wrappedColumnsSet = useMemo(
     () => new Set(wrappedColumnState),
     [wrappedColumnState],
+  );
+
+  const columnDataTypes = useMemo(
+    () => new Map(columnFields),
+    [columnFields],
+  );
+
+  const wrapThemeMetrics = useMemo(() => getGlideWrapThemeMetrics(theme), [theme]);
+
+  const computeFittedRowHeights = useCallback(
+    (columnsToFit: string[]) => {
+      if (wrappedRowHeightStrategy !== "fixed" || columnsToFit.length === 0) {
+        return undefined;
+      }
+
+      return estimateWrappedRowHeights({
+        data,
+        wrappedColumns: new Set(columnsToFit),
+        columnWidths,
+        columnDataTypes,
+        strategy: "approx",
+        themeMetrics: wrapThemeMetrics,
+      });
+    },
+    [columnDataTypes, columnWidths, data, wrapThemeMetrics, wrappedRowHeightStrategy],
   );
 
   const columns: ModifiedGridColumn[] = useMemo(() => {
@@ -122,7 +155,9 @@ export const GlideDataEditor = <T,>({
       columns.push({
         id: columnName,
         title: columnName,
-        width: columnWidths[columnName], // Enables resizing
+        width: wrappedColumnsSet.has(columnName)
+          ? getWrappedColumnWidth(columnWidths[columnName])
+          : columnWidths[columnName],
         icon: editable
           ? getColumnHeaderIcon(fieldType)
           : GridColumnIcon.ProtectedColumnOverlay,
@@ -139,7 +174,32 @@ export const GlideDataEditor = <T,>({
     }
 
     return columns;
-  }, [columnFields, columnWidths, editableColumns, theme]);
+  }, [columnFields, columnWidths, editableColumns, theme, wrappedColumnsSet]);
+
+  const rowHeights = useMemo(() => {
+    if (wrappedRowHeightStrategy === "fixed") {
+      return fittedRowHeights ??
+        (wrappedColumnState.length > 0 ? FIXED_WRAPPED_ROW_HEIGHT : undefined);
+    }
+
+    return estimateWrappedRowHeights({
+      data,
+      wrappedColumns: wrappedColumnsSet,
+      columnWidths,
+      columnDataTypes,
+      strategy: wrappedRowHeightStrategy,
+      themeMetrics: wrapThemeMetrics,
+    });
+  }, [
+    columnDataTypes,
+    columnWidths,
+    data,
+    fittedRowHeights,
+    wrapThemeMetrics,
+    wrappedColumnState.length,
+    wrappedColumnsSet,
+    wrappedRowHeightStrategy,
+  ]);
 
   // Apply initial edits after data has loaded
   useEffect(() => {
@@ -316,9 +376,11 @@ export const GlideDataEditor = <T,>({
   const onColumnResize = useCallback((column: GridColumn, newSize: number) => {
     setColumnWidths((prev) => ({
       ...prev,
-      [column.title]: newSize,
+      [column.title]: wrappedColumnsSet.has(column.title)
+        ? getWrappedColumnWidth(newSize)
+        : newSize,
     }));
-  }, []);
+  }, [wrappedColumnsSet]);
 
   // Only called when user edits a cell, not deletes
   const validateCell = useCallback(
@@ -453,11 +515,40 @@ export const GlideDataEditor = <T,>({
     }
 
     const columnName = columns[menu.col].title;
-    setWrappedColumnState((prev) =>
-      prev.includes(columnName)
+    setWrappedColumnState((prev) => {
+      const nextWrappedColumns = prev.includes(columnName)
         ? prev.filter((name) => name !== columnName)
-        : [...prev, columnName],
-    );
+        : [...prev, columnName];
+
+      if (wrappedRowHeightStrategy === "fixed") {
+        const nextFitHeightColumns = fitHeightColumns.filter(
+          (name) => nextWrappedColumns.includes(name),
+        );
+        setFitHeightColumns(nextFitHeightColumns);
+        setFittedRowHeights(computeFittedRowHeights(nextFitHeightColumns));
+      }
+
+      return nextWrappedColumns;
+    });
+    setMenu(undefined);
+  };
+
+  const handleFitHeightToText = () => {
+    if (!menu || wrappedRowHeightStrategy !== "fixed") {
+      return;
+    }
+
+    const columnName = columns[menu.col].title;
+    const nextWrappedColumns = wrappedColumnsSet.has(columnName)
+      ? wrappedColumnState
+      : [...wrappedColumnState, columnName];
+    const nextFitHeightColumns = fitHeightColumns.includes(columnName)
+      ? fitHeightColumns
+      : [...fitHeightColumns, columnName];
+
+    setWrappedColumnState(nextWrappedColumns);
+    setFitHeightColumns(nextFitHeightColumns);
+    setFittedRowHeights(computeFittedRowHeights(nextFitHeightColumns));
     setMenu(undefined);
   };
 
@@ -487,6 +578,13 @@ export const GlideDataEditor = <T,>({
           ? prev.map((name) => (name === oldColumnName ? newName : name))
           : prev,
       );
+      setFitHeightColumns((prev) => {
+        const nextFitHeightColumns = prev.includes(oldColumnName)
+          ? prev.map((name) => (name === oldColumnName ? newName : name))
+          : prev;
+        setFittedRowHeights(computeFittedRowHeights(nextFitHeightColumns));
+        return nextFitHeightColumns;
+      });
       setColumnFields((prev) =>
         modifyColumnFields({
           columnFields: prev,
@@ -510,6 +608,11 @@ export const GlideDataEditor = <T,>({
       setWrappedColumnState((prev) =>
         prev.filter((name) => name !== columnName),
       );
+      setFitHeightColumns((prev) => {
+        const nextFitHeightColumns = prev.filter((name) => name !== columnName);
+        setFittedRowHeights(computeFittedRowHeights(nextFitHeightColumns));
+        return nextFitHeightColumns;
+      });
       setColumnFields((prev) =>
         modifyColumnFields({
           columnFields: prev,
@@ -562,8 +665,8 @@ export const GlideDataEditor = <T,>({
 
   const isLastColumn = menu?.col === columns.length - 1;
   const selectedColumnName = menu ? columns[menu.col].title : undefined;
-  const isSelectedColumnWrapped = selectedColumnName
-    ? wrappedColumnsSet.has(selectedColumnName)
+  const isSelectedColumnFitHeight = selectedColumnName
+    ? fitHeightColumns.includes(selectedColumnName)
     : false;
 
   // There is a guarantee that only one column's menu is open (as interaction is disabled outside of the menu)
@@ -649,8 +752,15 @@ export const GlideDataEditor = <T,>({
 
           <DropdownMenuItem onClick={handleToggleWrapColumn}>
             <WrapTextIcon className={iconClassName} />
-            {isSelectedColumnWrapped ? "No wrap text" : "Wrap text"}
+            Toggle wrapping
           </DropdownMenuItem>
+
+          {wrappedRowHeightStrategy === "fixed" && (
+            <DropdownMenuItem onClick={handleFitHeightToText}>
+              <WrapTextIcon className={iconClassName} />
+              {isSelectedColumnFitHeight ? "Refit height to text" : "Fit height to text"}
+            </DropdownMenuItem>
+          )}
 
           {!isLargeDataset && bulkEditItems}
         </DropdownMenuContent>
@@ -679,7 +789,11 @@ export const GlideDataEditor = <T,>({
           allowedFillDirections="vertical" // We can support all directions, but we need to handle datatype logic
           onKeyDown={onKeyDown}
           height={data.length > 10 ? 450 : undefined}
-          rowHeight={wrappedColumnState.length > 0 ? WRAPPED_ROW_HEIGHT : undefined}
+          rowHeight={
+            Array.isArray(rowHeights)
+              ? (index: number) => rowHeights[index] ?? FIXED_WRAPPED_ROW_HEIGHT
+              : rowHeights
+          }
           width={"100%"}
           rowMarkers={{
             kind: "both",

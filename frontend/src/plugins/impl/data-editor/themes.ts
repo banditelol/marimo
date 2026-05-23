@@ -1,6 +1,6 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
-import type { Theme } from "@glideapps/glide-data-grid";
+import { getDefaultTheme, type Theme } from "@glideapps/glide-data-grid";
 import type { ResolvedTheme } from "@/theme/useTheme";
 
 export function getGlideTheme(
@@ -45,5 +45,36 @@ export function getGlideTheme(
 
     headerFontStyle: "bold 14px",
     baseFontStyle: "13px",
+  };
+}
+
+export type GlideWrapThemeMetrics = Pick<
+  Theme,
+  | "baseFontStyle"
+  | "fontFamily"
+  | "lineHeight"
+  | "cellHorizontalPadding"
+  | "cellVerticalPadding"
+> & {
+  baseFontFull: string;
+};
+
+export function getGlideWrapThemeMetrics(
+  theme: ResolvedTheme,
+): GlideWrapThemeMetrics {
+  const defaultTheme = getDefaultTheme();
+  const themeOverride = getGlideTheme(theme);
+  const mergedTheme = {
+    ...defaultTheme,
+    ...themeOverride,
+  };
+
+  return {
+    baseFontStyle: mergedTheme.baseFontStyle,
+    fontFamily: mergedTheme.fontFamily,
+    lineHeight: mergedTheme.lineHeight,
+    cellHorizontalPadding: mergedTheme.cellHorizontalPadding,
+    cellVerticalPadding: mergedTheme.cellVerticalPadding,
+    baseFontFull: `${mergedTheme.baseFontStyle} ${mergedTheme.fontFamily}`,
   };
 }
