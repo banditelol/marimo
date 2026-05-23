@@ -1,6 +1,6 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { FieldTypes } from "@/components/data-table/types";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { GlideDataEditor } from "../glide-data-editor";
@@ -30,6 +30,7 @@ interface MockDataEditorProps {
   getCellContent?: (cell: [number, number]) => MockGridCell;
   rowHeight?: number | ((rowIndex: number) => number);
   columns?: Array<{ title: string; width?: number }>;
+  onColumnResize?: (column: { title: string }, newSize: number) => void;
 }
 
 let latestDataEditorProps: MockDataEditorProps | undefined;
@@ -183,5 +184,52 @@ describe("GlideDataEditor", () => {
     fireEvent.click(screen.getByText("Toggle wrapping"));
 
     expect(latestDataEditorProps?.rowHeight).toBeUndefined();
+  });
+
+  it("keeps approximate row height stable during active resize", () => {
+    vi.useFakeTimers();
+
+    const deferredProps = {
+      ...baseProps,
+      data: [
+        { notes: "short" },
+        {
+          notes:
+            "This is a much longer note that should definitely wrap across many more lines when the width is narrow and then collapse once the resized width has been committed after release.",
+        },
+      ],
+    };
+
+    render(
+      <GlideDataEditor
+        {...deferredProps}
+        wrappedColumns={["notes"]}
+        wrappedRowHeightStrategy="approxDeferred"
+      />,
+    );
+
+    const initialHeight =
+      typeof latestDataEditorProps?.rowHeight === "function"
+        ? latestDataEditorProps.rowHeight(1)
+        : 0;
+
+    act(() => {
+      latestDataEditorProps?.onColumnResize?.({ title: "notes" }, 600);
+    });
+
+    expect(latestDataEditorProps?.columns?.[0]?.width).toBe(600);
+
+    const beforeSettleHeight =
+      typeof latestDataEditorProps?.rowHeight === "function"
+        ? latestDataEditorProps.rowHeight(1)
+        : 0;
+
+    expect(beforeSettleHeight).toBe(initialHeight);
+
+    act(() => {
+      window.dispatchEvent(new Event("pointerup"));
+      vi.runAllTimers();
+    });
+    vi.useRealTimers();
   });
 });

@@ -16,6 +16,7 @@ const EXTRA_PRETEXT_VERTICAL_PADDING = 2;
 export type WrappedRowHeightStrategy =
   | "fixed"
   | "approx"
+  | "approxDeferred"
   | "measureText"
   | "pretext";
 
@@ -232,6 +233,7 @@ function getLineCount(
 ): number {
   switch (strategy) {
     case "approx":
+    case "approxDeferred":
       return getApproximateLineCount(value, width, themeMetrics);
     case "measureText":
       return getMeasuredLineCount(value, width, themeMetrics, getWordSegments);

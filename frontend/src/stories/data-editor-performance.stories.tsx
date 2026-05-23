@@ -87,6 +87,7 @@ const STRATEGIES: Array<{
 }> = [
   { label: "Fixed wrapped height", strategy: "fixed" },
   { label: "Approximate dynamic", strategy: "approx" },
+  { label: "Approximate deferred", strategy: "approxDeferred" },
   { label: "Canvas measureText", strategy: "measureText" },
   { label: "Pretext", strategy: "pretext" },
 ];

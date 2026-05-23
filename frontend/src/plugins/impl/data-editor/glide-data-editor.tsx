@@ -109,12 +109,16 @@ export const GlideDataEditor = <T,>({
   });
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [settledColumnWidths, setSettledColumnWidths] = useState<Record<string, number>>({});
   const [wrappedColumnState, setWrappedColumnState] =
     useInternalStateWithSync<string[]>(wrappedColumns ?? [], isEqual);
   const [fitHeightColumns, setFitHeightColumns] = useState<string[]>([]);
   const [fittedRowHeights, setFittedRowHeights] = useState<number[] | undefined>();
   const rerender = useNonce();
   const hasAppliedEdits = useRef(false);
+  const resizeCommitTimeoutRef = useRef<number | null>(null);
+  const pendingResizeWidthsRef = useRef<Record<string, number>>({});
+  const isColumnResizeActiveRef = useRef(false);
 
   const wrappedColumnsSet = useMemo(
     () => new Set(wrappedColumnState),
@@ -137,13 +141,23 @@ export const GlideDataEditor = <T,>({
       return estimateWrappedRowHeights({
         data,
         wrappedColumns: new Set(columnsToFit),
-        columnWidths,
+        columnWidths:
+          wrappedRowHeightStrategy === "approxDeferred"
+            ? settledColumnWidths
+            : columnWidths,
         columnDataTypes,
         strategy: "approx",
         themeMetrics: wrapThemeMetrics,
       });
     },
-    [columnDataTypes, columnWidths, data, wrapThemeMetrics, wrappedRowHeightStrategy],
+    [
+      columnDataTypes,
+      columnWidths,
+      data,
+      settledColumnWidths,
+      wrapThemeMetrics,
+      wrappedRowHeightStrategy,
+    ],
   );
 
   const columns: ModifiedGridColumn[] = useMemo(() => {
@@ -184,22 +198,69 @@ export const GlideDataEditor = <T,>({
 
     return estimateWrappedRowHeights({
       data,
-      wrappedColumns: wrappedColumnsSet,
-      columnWidths,
-      columnDataTypes,
-      strategy: wrappedRowHeightStrategy,
-      themeMetrics: wrapThemeMetrics,
+        wrappedColumns: wrappedColumnsSet,
+        columnWidths:
+          wrappedRowHeightStrategy === "approxDeferred"
+            ? settledColumnWidths
+            : columnWidths,
+        columnDataTypes,
+        strategy: wrappedRowHeightStrategy,
+        themeMetrics: wrapThemeMetrics,
     });
   }, [
     columnDataTypes,
     columnWidths,
     data,
     fittedRowHeights,
+    settledColumnWidths,
     wrapThemeMetrics,
     wrappedColumnState.length,
     wrappedColumnsSet,
     wrappedRowHeightStrategy,
   ]);
+
+  useEffect(() => {
+    const commitPendingResizeWidths = () => {
+      if (!isColumnResizeActiveRef.current) {
+        return;
+      }
+
+      isColumnResizeActiveRef.current = false;
+      if (resizeCommitTimeoutRef.current != null) {
+        window.clearTimeout(resizeCommitTimeoutRef.current);
+        resizeCommitTimeoutRef.current = null;
+      }
+
+      const pendingEntries = Object.entries(pendingResizeWidthsRef.current);
+      if (pendingEntries.length === 0) {
+        return;
+      }
+
+      setSettledColumnWidths((prev) => ({
+        ...prev,
+        ...pendingResizeWidthsRef.current,
+      }));
+      pendingResizeWidthsRef.current = {};
+    };
+
+    const handlePointerRelease = () => {
+      if (wrappedRowHeightStrategy !== "approxDeferred") {
+        return;
+      }
+      commitPendingResizeWidths();
+    };
+
+    window.addEventListener("pointerup", handlePointerRelease);
+    window.addEventListener("mouseup", handlePointerRelease);
+
+    return () => {
+      window.removeEventListener("pointerup", handlePointerRelease);
+      window.removeEventListener("mouseup", handlePointerRelease);
+      if (resizeCommitTimeoutRef.current != null) {
+        window.clearTimeout(resizeCommitTimeoutRef.current);
+      }
+    };
+  }, [wrappedRowHeightStrategy]);
 
   // Apply initial edits after data has loaded
   useEffect(() => {
@@ -374,13 +435,43 @@ export const GlideDataEditor = <T,>({
   );
 
   const onColumnResize = useCallback((column: GridColumn, newSize: number) => {
+    const nextSize = wrappedColumnsSet.has(column.title)
+      ? getWrappedColumnWidth(newSize)
+      : newSize;
+
     setColumnWidths((prev) => ({
       ...prev,
-      [column.title]: wrappedColumnsSet.has(column.title)
-        ? getWrappedColumnWidth(newSize)
-        : newSize,
+      [column.title]: nextSize,
     }));
-  }, [wrappedColumnsSet]);
+
+    if (wrappedRowHeightStrategy === "approxDeferred") {
+      isColumnResizeActiveRef.current = true;
+      pendingResizeWidthsRef.current = {
+        ...pendingResizeWidthsRef.current,
+        [column.title]: nextSize,
+      };
+
+      if (resizeCommitTimeoutRef.current != null) {
+        window.clearTimeout(resizeCommitTimeoutRef.current);
+      }
+
+      resizeCommitTimeoutRef.current = window.setTimeout(() => {
+        isColumnResizeActiveRef.current = false;
+        setSettledColumnWidths((prev) => ({
+          ...prev,
+          ...pendingResizeWidthsRef.current,
+        }));
+        pendingResizeWidthsRef.current = {};
+        resizeCommitTimeoutRef.current = null;
+      }, 400);
+      return;
+    }
+
+    setSettledColumnWidths((prev) => ({
+      ...prev,
+      [column.title]: nextSize,
+    }));
+  }, [wrappedColumnsSet, wrappedRowHeightStrategy]);
 
   // Only called when user edits a cell, not deletes
   const validateCell = useCallback(
