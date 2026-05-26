@@ -59,7 +59,9 @@ import {
   renameColumn,
 } from "./data-utils";
 import {
+  DEFAULT_ROW_HEIGHT,
   estimateWrappedRowHeights,
+  estimateWrappedRowHeightsInRange,
   FIXED_WRAPPED_ROW_HEIGHT,
   getWrappedColumnWidth,
   type WrappedRowHeightStrategy,
@@ -80,6 +82,13 @@ interface GlideDataEditorProps<T> {
   onRenameColumn: (columnIdx: number, newName: string) => void;
   onDeleteColumn: (columnIdx: number) => void;
   onAddColumn: (columnIdx: number, newName: string) => void;
+}
+
+interface ResizeAnchorSession {
+  id: number;
+  anchorRow: number;
+  phase: "resizing" | "settling";
+  correctionApplied: boolean;
 }
 
 export const GlideDataEditor = <T,>({
@@ -109,28 +118,49 @@ export const GlideDataEditor = <T,>({
   });
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
-  const [settledColumnWidths, setSettledColumnWidths] = useState<Record<string, number>>({});
-  const [wrappedColumnState, setWrappedColumnState] =
-    useInternalStateWithSync<string[]>(wrappedColumns ?? [], isEqual);
+  const [settledColumnWidths, setSettledColumnWidths] = useState<
+    Record<string, number>
+  >({});
+  const [wrappedColumnState, setWrappedColumnState] = useInternalStateWithSync<
+    string[]
+  >(wrappedColumns ?? [], isEqual);
   const [fitHeightColumns, setFitHeightColumns] = useState<string[]>([]);
-  const [fittedRowHeights, setFittedRowHeights] = useState<number[] | undefined>();
+  const [fittedRowHeights, setFittedRowHeights] = useState<
+    number[] | undefined
+  >();
+  const [incrementalRowHeights, setIncrementalRowHeights] = useState<
+    number[] | undefined
+  >();
+  const [isIncrementalResizeActive, setIsIncrementalResizeActive] =
+    useState(false);
+  const [visibleRowWindow, setVisibleRowWindow] = useState({ y: 0, height: 0 });
   const rerender = useNonce();
   const hasAppliedEdits = useRef(false);
   const resizeCommitTimeoutRef = useRef<number | null>(null);
   const pendingResizeWidthsRef = useRef<Record<string, number>>({});
   const isColumnResizeActiveRef = useRef(false);
+  const incrementalComputationVersionRef = useRef(0);
+  const resizeAnchorSessionRef = useRef<ResizeAnchorSession | null>(null);
+  const nextResizeAnchorSessionIdRef = useRef(0);
+  const isIncrementalResizeActiveRef = useRef(false);
+  const visibleRowWindowRef = useRef({ y: 0, height: 0 });
 
   const wrappedColumnsSet = useMemo(
     () => new Set(wrappedColumnState),
     [wrappedColumnState],
   );
 
-  const columnDataTypes = useMemo(
-    () => new Map(columnFields),
-    [columnFields],
-  );
+  const columnDataTypes = useMemo(() => new Map(columnFields), [columnFields]);
 
-  const wrapThemeMetrics = useMemo(() => getGlideWrapThemeMetrics(theme), [theme]);
+  const wrapThemeMetrics = useMemo(
+    () => getGlideWrapThemeMetrics(theme),
+    [theme],
+  );
+  const visibleRowEstimate =
+    data.length > 10
+      ? Math.max(1, Math.ceil(450 / DEFAULT_ROW_HEIGHT))
+      : Math.max(1, data.length);
+  const incrementalBatchSize = Math.max(100, visibleRowEstimate * 2);
 
   const computeFittedRowHeights = useCallback(
     (columnsToFit: string[]) => {
@@ -141,10 +171,7 @@ export const GlideDataEditor = <T,>({
       return estimateWrappedRowHeights({
         data,
         wrappedColumns: new Set(columnsToFit),
-        columnWidths:
-          wrappedRowHeightStrategy === "approxDeferred"
-            ? settledColumnWidths
-            : columnWidths,
+        columnWidths,
         columnDataTypes,
         strategy: "approx",
         themeMetrics: wrapThemeMetrics,
@@ -154,7 +181,6 @@ export const GlideDataEditor = <T,>({
       columnDataTypes,
       columnWidths,
       data,
-      settledColumnWidths,
       wrapThemeMetrics,
       wrappedRowHeightStrategy,
     ],
@@ -192,26 +218,36 @@ export const GlideDataEditor = <T,>({
 
   const rowHeights = useMemo(() => {
     if (wrappedRowHeightStrategy === "fixed") {
-      return fittedRowHeights ??
-        (wrappedColumnState.length > 0 ? FIXED_WRAPPED_ROW_HEIGHT : undefined);
+      return (
+        fittedRowHeights ??
+        (wrappedColumnState.length > 0 ? FIXED_WRAPPED_ROW_HEIGHT : undefined)
+      );
+    }
+
+    if (
+      wrappedRowHeightStrategy === "approxIncremental" ||
+      wrappedRowHeightStrategy === "approxIncrementalBaseline"
+    ) {
+      return incrementalRowHeights;
     }
 
     return estimateWrappedRowHeights({
       data,
-        wrappedColumns: wrappedColumnsSet,
-        columnWidths:
-          wrappedRowHeightStrategy === "approxDeferred"
-            ? settledColumnWidths
-            : columnWidths,
-        columnDataTypes,
-        strategy: wrappedRowHeightStrategy,
-        themeMetrics: wrapThemeMetrics,
+      wrappedColumns: wrappedColumnsSet,
+      columnWidths:
+        wrappedRowHeightStrategy === "approxDeferred"
+          ? settledColumnWidths
+          : columnWidths,
+      columnDataTypes,
+      strategy: wrappedRowHeightStrategy,
+      themeMetrics: wrapThemeMetrics,
     });
   }, [
     columnDataTypes,
     columnWidths,
     data,
     fittedRowHeights,
+    incrementalRowHeights,
     settledColumnWidths,
     wrapThemeMetrics,
     wrappedColumnState.length,
@@ -219,13 +255,243 @@ export const GlideDataEditor = <T,>({
     wrappedRowHeightStrategy,
   ]);
 
+  const onVisibleRegionChanged = useCallback((region: Rectangle) => {
+    visibleRowWindowRef.current = { y: region.y, height: region.height };
+    setVisibleRowWindow((prev) => {
+      if (prev.y === region.y && prev.height === region.height) {
+        return prev;
+      }
+      return { y: region.y, height: region.height };
+    });
+  }, []);
+
+  const startResizeAnchorSession = useCallback(() => {
+    const currentSession = resizeAnchorSessionRef.current;
+    if (currentSession?.phase === "resizing") {
+      return currentSession;
+    }
+
+    const anchorRow = Math.min(
+      Math.max(0, visibleRowWindowRef.current.y),
+      Math.max(0, data.length - 1),
+    );
+    const nextSession: ResizeAnchorSession = {
+      id: nextResizeAnchorSessionIdRef.current + 1,
+      anchorRow,
+      phase: "resizing",
+      correctionApplied: false,
+    };
+
+    nextResizeAnchorSessionIdRef.current = nextSession.id;
+    resizeAnchorSessionRef.current = nextSession;
+    return nextSession;
+  }, [data.length]);
+
+  const finishIncrementalResizeSession = useCallback(() => {
+    isIncrementalResizeActiveRef.current = false;
+    setIsIncrementalResizeActive(false);
+
+    const currentSession = resizeAnchorSessionRef.current;
+    if (currentSession?.phase === "resizing") {
+      resizeAnchorSessionRef.current = {
+        ...currentSession,
+        phase: "settling",
+      };
+    }
+  }, []);
+
+  const interruptSettlingResizeAnchor = useCallback(() => {
+    const currentSession = resizeAnchorSessionRef.current;
+    if (
+      currentSession?.phase === "settling" &&
+      !currentSession.correctionApplied
+    ) {
+      resizeAnchorSessionRef.current = null;
+    }
+  }, []);
+
+  const scrollResizeAnchorIntoView = useCallback(
+    (sessionId: number, row: number) => {
+      window.requestAnimationFrame(() => {
+        const currentSession = resizeAnchorSessionRef.current;
+        if (
+          !currentSession ||
+          currentSession.id !== sessionId ||
+          currentSession.phase !== "settling" ||
+          currentSession.correctionApplied
+        ) {
+          return;
+        }
+
+        resizeAnchorSessionRef.current = {
+          ...currentSession,
+          correctionApplied: true,
+        };
+        dataEditorRef.current?.scrollTo(0, row, "vertical", 0, 0, {
+          vAlign: "start",
+        });
+        if (resizeAnchorSessionRef.current?.id === sessionId) {
+          resizeAnchorSessionRef.current = null;
+        }
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
-    const commitPendingResizeWidths = () => {
-      if (!isColumnResizeActiveRef.current) {
+    if (
+      wrappedRowHeightStrategy !== "approxIncremental" &&
+      wrappedRowHeightStrategy !== "approxIncrementalBaseline"
+    ) {
+      setIncrementalRowHeights(undefined);
+      resizeAnchorSessionRef.current = null;
+      return;
+    }
+
+    incrementalComputationVersionRef.current += 1;
+    const computationVersion = incrementalComputationVersionRef.current;
+
+    if (wrappedColumnsSet.size === 0 || data.length === 0) {
+      setIncrementalRowHeights(undefined);
+      resizeAnchorSessionRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    setIncrementalRowHeights((prev) => {
+      if (!prev || prev.length !== data.length) {
+        return Array.from({ length: data.length }, () => DEFAULT_ROW_HEIGHT);
+      }
+      return prev;
+    });
+
+    const batchRanges: Array<{ start: number; end: number }> = [];
+
+    const activeResizeSession = resizeAnchorSessionRef.current;
+    const anchorStart = Math.min(
+      Math.max(0, activeResizeSession?.anchorRow ?? visibleRowWindow.y),
+      Math.max(0, data.length - 1),
+    );
+    const anchorEnd = Math.min(data.length, anchorStart + incrementalBatchSize);
+    batchRanges.push({ start: anchorStart, end: anchorEnd });
+
+    for (let end = anchorStart; end > 0; end -= incrementalBatchSize) {
+      batchRanges.push({
+        start: Math.max(0, end - incrementalBatchSize),
+        end,
+      });
+    }
+
+    for (
+      let start = anchorEnd;
+      start < data.length;
+      start += incrementalBatchSize
+    ) {
+      batchRanges.push({
+        start,
+        end: Math.min(data.length, start + incrementalBatchSize),
+      });
+    }
+
+    const runBatch = (batchIndexPosition: number) => {
+      if (
+        cancelled ||
+        computationVersion !== incrementalComputationVersionRef.current
+      ) {
         return;
       }
 
+      if (
+        batchIndexPosition >= batchRanges.length ||
+        (isIncrementalResizeActive && batchIndexPosition > 0)
+      ) {
+        return;
+      }
+
+      const range = batchRanges[batchIndexPosition];
+      if (!range) {
+        return;
+      }
+
+      const batchHeights = estimateWrappedRowHeightsInRange({
+        data,
+        wrappedColumns: wrappedColumnsSet,
+        columnWidths,
+        columnDataTypes,
+        strategy: "approx",
+        themeMetrics: wrapThemeMetrics,
+        start: range.start,
+        end: range.end,
+      });
+
+      if (batchHeights && batchHeights.length > 0) {
+        setIncrementalRowHeights((prev) => {
+          const next = prev
+            ? [...prev]
+            : Array.from({ length: data.length }, () => DEFAULT_ROW_HEIGHT);
+
+          for (let index = 0; index < batchHeights.length; index += 1) {
+            next[range.start + index] =
+              batchHeights[index] ?? DEFAULT_ROW_HEIGHT;
+          }
+          return next;
+        });
+
+        const resizeAnchorSession = resizeAnchorSessionRef.current;
+        const hasMeasuredRowsThroughAnchor =
+          range.start === 0 ||
+          (resizeAnchorSession?.anchorRow === 0 && batchIndexPosition === 0);
+        const shouldRestoreResizeAnchor =
+          wrappedRowHeightStrategy === "approxIncremental" &&
+          resizeAnchorSession != null &&
+          resizeAnchorSession.phase === "settling" &&
+          !resizeAnchorSession.correctionApplied &&
+          !isIncrementalResizeActive &&
+          hasMeasuredRowsThroughAnchor;
+        if (shouldRestoreResizeAnchor) {
+          scrollResizeAnchorIntoView(
+            resizeAnchorSession.id,
+            resizeAnchorSession.anchorRow,
+          );
+        }
+      }
+
+      window.requestAnimationFrame(() => {
+        runBatch(batchIndexPosition + 1);
+      });
+    };
+
+    window.requestAnimationFrame(() => {
+      runBatch(0);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    columnDataTypes,
+    columnWidths,
+    data,
+    isIncrementalResizeActive,
+    incrementalBatchSize,
+    scrollResizeAnchorIntoView,
+    visibleRowWindow.height,
+    visibleRowWindow.y,
+    wrapThemeMetrics,
+    wrappedColumnsSet,
+    wrappedRowHeightStrategy,
+  ]);
+
+  useEffect(() => {
+    const commitPendingResizeWidths = () => {
+      const wasDeferredResizeActive = isColumnResizeActiveRef.current;
       isColumnResizeActiveRef.current = false;
+      finishIncrementalResizeSession();
+
+      if (!wasDeferredResizeActive) {
+        return;
+      }
+
       if (resizeCommitTimeoutRef.current != null) {
         window.clearTimeout(resizeCommitTimeoutRef.current);
         resizeCommitTimeoutRef.current = null;
@@ -244,7 +510,11 @@ export const GlideDataEditor = <T,>({
     };
 
     const handlePointerRelease = () => {
-      if (wrappedRowHeightStrategy !== "approxDeferred") {
+      if (
+        wrappedRowHeightStrategy !== "approxDeferred" &&
+        wrappedRowHeightStrategy !== "approxIncremental" &&
+        wrappedRowHeightStrategy !== "approxIncrementalBaseline"
+      ) {
         return;
       }
       commitPendingResizeWidths();
@@ -260,7 +530,7 @@ export const GlideDataEditor = <T,>({
         window.clearTimeout(resizeCommitTimeoutRef.current);
       }
     };
-  }, [wrappedRowHeightStrategy]);
+  }, [finishIncrementalResizeSession, wrappedRowHeightStrategy]);
 
   // Apply initial edits after data has loaded
   useEffect(() => {
@@ -434,44 +704,83 @@ export const GlideDataEditor = <T,>({
     [columns, onAddEdits, setData],
   );
 
-  const onColumnResize = useCallback((column: GridColumn, newSize: number) => {
-    const nextSize = wrappedColumnsSet.has(column.title)
-      ? getWrappedColumnWidth(newSize)
-      : newSize;
+  const onColumnResize = useCallback(
+    (column: GridColumn, newSize: number) => {
+      const nextSize = wrappedColumnsSet.has(column.title)
+        ? getWrappedColumnWidth(newSize)
+        : newSize;
 
-    setColumnWidths((prev) => ({
-      ...prev,
-      [column.title]: nextSize,
-    }));
-
-    if (wrappedRowHeightStrategy === "approxDeferred") {
-      isColumnResizeActiveRef.current = true;
-      pendingResizeWidthsRef.current = {
-        ...pendingResizeWidthsRef.current,
+      setColumnWidths((prev) => ({
+        ...prev,
         [column.title]: nextSize,
-      };
+      }));
 
-      if (resizeCommitTimeoutRef.current != null) {
-        window.clearTimeout(resizeCommitTimeoutRef.current);
+      if (wrappedRowHeightStrategy === "approxDeferred") {
+        isColumnResizeActiveRef.current = true;
+        pendingResizeWidthsRef.current = {
+          ...pendingResizeWidthsRef.current,
+          [column.title]: nextSize,
+        };
+
+        if (resizeCommitTimeoutRef.current != null) {
+          window.clearTimeout(resizeCommitTimeoutRef.current);
+        }
+
+        resizeCommitTimeoutRef.current = window.setTimeout(() => {
+          isColumnResizeActiveRef.current = false;
+          setSettledColumnWidths((prev) => ({
+            ...prev,
+            ...pendingResizeWidthsRef.current,
+          }));
+          pendingResizeWidthsRef.current = {};
+          resizeCommitTimeoutRef.current = null;
+        }, 400);
+        return;
       }
 
-      resizeCommitTimeoutRef.current = window.setTimeout(() => {
-        isColumnResizeActiveRef.current = false;
-        setSettledColumnWidths((prev) => ({
-          ...prev,
-          ...pendingResizeWidthsRef.current,
-        }));
-        pendingResizeWidthsRef.current = {};
-        resizeCommitTimeoutRef.current = null;
-      }, 400);
-      return;
-    }
+      if (wrappedRowHeightStrategy === "approxIncremental") {
+        startResizeAnchorSession();
+        isIncrementalResizeActiveRef.current = true;
+        setIsIncrementalResizeActive(true);
 
-    setSettledColumnWidths((prev) => ({
-      ...prev,
-      [column.title]: nextSize,
-    }));
-  }, [wrappedColumnsSet, wrappedRowHeightStrategy]);
+        if (resizeCommitTimeoutRef.current != null) {
+          window.clearTimeout(resizeCommitTimeoutRef.current);
+        }
+
+        resizeCommitTimeoutRef.current = window.setTimeout(() => {
+          finishIncrementalResizeSession();
+          resizeCommitTimeoutRef.current = null;
+        }, 400);
+        return;
+      }
+
+      if (wrappedRowHeightStrategy === "approxIncrementalBaseline") {
+        isIncrementalResizeActiveRef.current = true;
+        setIsIncrementalResizeActive(true);
+
+        if (resizeCommitTimeoutRef.current != null) {
+          window.clearTimeout(resizeCommitTimeoutRef.current);
+        }
+
+        resizeCommitTimeoutRef.current = window.setTimeout(() => {
+          finishIncrementalResizeSession();
+          resizeCommitTimeoutRef.current = null;
+        }, 400);
+        return;
+      }
+
+      setSettledColumnWidths((prev) => ({
+        ...prev,
+        [column.title]: nextSize,
+      }));
+    },
+    [
+      finishIncrementalResizeSession,
+      startResizeAnchorSession,
+      wrappedColumnsSet,
+      wrappedRowHeightStrategy,
+    ],
+  );
 
   // Only called when user edits a cell, not deletes
   const validateCell = useCallback(
@@ -612,8 +921,8 @@ export const GlideDataEditor = <T,>({
         : [...prev, columnName];
 
       if (wrappedRowHeightStrategy === "fixed") {
-        const nextFitHeightColumns = fitHeightColumns.filter(
-          (name) => nextWrappedColumns.includes(name),
+        const nextFitHeightColumns = fitHeightColumns.filter((name) =>
+          nextWrappedColumns.includes(name),
         );
         setFitHeightColumns(nextFitHeightColumns);
         setFittedRowHeights(computeFittedRowHeights(nextFitHeightColumns));
@@ -849,7 +1158,9 @@ export const GlideDataEditor = <T,>({
           {wrappedRowHeightStrategy === "fixed" && (
             <DropdownMenuItem onClick={handleFitHeightToText}>
               <WrapTextIcon className={iconClassName} />
-              {isSelectedColumnFitHeight ? "Refit height to text" : "Fit height to text"}
+              {isSelectedColumnFitHeight
+                ? "Refit height to text"
+                : "Fit height to text"}
             </DropdownMenuItem>
           )}
 
@@ -860,7 +1171,12 @@ export const GlideDataEditor = <T,>({
   };
 
   return (
-    <div className="relative w-full min-w-0">
+    <div
+      className="relative w-full min-w-0"
+      onPointerDownCapture={interruptSettlingResizeAnchor}
+      onTouchStartCapture={interruptSettlingResizeAnchor}
+      onWheelCapture={interruptSettlingResizeAnchor}
+    >
       <ErrorBoundary>
         <DataEditor
           ref={dataEditorRef}
@@ -893,6 +1209,7 @@ export const GlideDataEditor = <T,>({
           onCellEdited={onCellEdited}
           onColumnResize={onColumnResize}
           onHeaderMenuClick={onHeaderMenuClick}
+          onVisibleRegionChanged={onVisibleRegionChanged}
           theme={getGlideTheme(theme)}
           trailingRowOptions={trailingRowOptions}
           onRowAppended={onRowAppend}

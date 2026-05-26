@@ -18,12 +18,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-HTMLCanvasElement.prototype.getContext = vi.fn(() =>
-  ({
-    font: "",
-    measureText,
-  }) as unknown as CanvasRenderingContext2D,
-);
+HTMLCanvasElement.prototype.getContext = vi.fn(
+  () =>
+    ({
+      font: "",
+      measureText,
+    }) as unknown as CanvasRenderingContext2D,
+) as unknown as typeof HTMLCanvasElement.prototype.getContext;
 
 describe("wrap-sizing", () => {
   it("enforces a minimum wrapped column width", () => {

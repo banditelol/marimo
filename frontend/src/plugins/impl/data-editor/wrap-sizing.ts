@@ -1,6 +1,9 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
-import { layout as layoutWithPretext, prepare as prepareWithPretext } from "@chenglou/pretext";
+import {
+  layout as layoutWithPretext,
+  prepare as prepareWithPretext,
+} from "@chenglou/pretext";
 import type { DataType } from "@/core/kernel/messages";
 import type { GlideWrapThemeMetrics } from "./themes";
 
@@ -17,6 +20,8 @@ export type WrappedRowHeightStrategy =
   | "fixed"
   | "approx"
   | "approxDeferred"
+  | "approxIncremental"
+  | "approxIncrementalBaseline"
   | "measureText"
   | "pretext";
 
@@ -24,7 +29,10 @@ type MeasureTextLike = (text: string) => number;
 
 const textWidthCache = new Map<string, number>();
 const approximateCharacterWidthCache = new Map<string, number>();
-const pretextPreparedTextCache = new Map<string, ReturnType<typeof prepareWithPretext>>();
+const pretextPreparedTextCache = new Map<
+  string,
+  ReturnType<typeof prepareWithPretext>
+>();
 
 export function getWrappedColumnWidth(width: number | undefined): number {
   if (width == null) {
@@ -58,13 +66,23 @@ function getApproximateLineCount(
   width: number,
   themeMetrics: GlideWrapThemeMetrics,
 ): number {
-  const usableWidth = Math.max(1, width - themeMetrics.cellHorizontalPadding * 2);
+  const usableWidth = Math.max(
+    1,
+    width - themeMetrics.cellHorizontalPadding * 2,
+  );
   const approximateCharacterWidth = getApproximateCharacterWidth(themeMetrics);
-  const charsPerLine = Math.max(1, Math.floor(usableWidth / approximateCharacterWidth));
+  const charsPerLine = Math.max(
+    1,
+    Math.floor(usableWidth / approximateCharacterWidth),
+  );
 
   return value
     .split("\n")
-    .reduce((lines, line) => lines + Math.max(1, Math.ceil(line.length / charsPerLine)), 0);
+    .reduce(
+      (lines, line) =>
+        lines + Math.max(1, Math.ceil(line.length / charsPerLine)),
+      0,
+    );
 }
 
 function isWrappableType(dataType: DataType): boolean {
@@ -121,7 +139,10 @@ function wrapSegments(
     return 1;
   }
 
-  const usableWidth = Math.max(1, width - themeMetrics.cellHorizontalPadding * 2);
+  const usableWidth = Math.max(
+    1,
+    width - themeMetrics.cellHorizontalPadding * 2,
+  );
   const segments = getSegments(line);
   let currentLineWidth = 0;
   let currentLineHasContent = false;
@@ -130,7 +151,10 @@ function wrapSegments(
   for (const segment of segments) {
     const segmentWidth = measureText(segment);
 
-    if (segmentWidth <= usableWidth && currentLineWidth + segmentWidth <= usableWidth) {
+    if (
+      segmentWidth <= usableWidth &&
+      currentLineWidth + segmentWidth <= usableWidth
+    ) {
       currentLineWidth += segmentWidth;
       currentLineHasContent ||= segment.trim().length > 0;
       continue;
@@ -187,7 +211,8 @@ function getMeasuredLineCount(
     .split("\n")
     .reduce(
       (lines, line) =>
-        lines + wrapSegments(line, width, themeMetrics, measureText, getSegments),
+        lines +
+        wrapSegments(line, width, themeMetrics, measureText, getSegments),
       0,
     );
 }
@@ -199,11 +224,14 @@ function getPretextLineMetrics(
 ): { lineCount: number; height: number } | undefined {
   const usableWidth = Math.max(
     1,
-    width - themeMetrics.cellHorizontalPadding * 2 - PRETEXT_WIDTH_SAFETY_MARGIN,
+    width -
+      themeMetrics.cellHorizontalPadding * 2 -
+      PRETEXT_WIDTH_SAFETY_MARGIN,
   );
   const fontSize = Number.parseFloat(themeMetrics.baseFontStyle);
   const lineHeight =
-    (Number.isFinite(fontSize) ? fontSize : DEFAULT_ROW_HEIGHT) * themeMetrics.lineHeight;
+    (Number.isFinite(fontSize) ? fontSize : DEFAULT_ROW_HEIGHT) *
+    themeMetrics.lineHeight;
   const cacheKey = `${themeMetrics.baseFontFull}:${value}`;
 
   let prepared = pretextPreparedTextCache.get(cacheKey);
@@ -234,6 +262,8 @@ function getLineCount(
   switch (strategy) {
     case "approx":
     case "approxDeferred":
+    case "approxIncremental":
+    case "approxIncrementalBaseline":
       return getApproximateLineCount(value, width, themeMetrics);
     case "measureText":
       return getMeasuredLineCount(value, width, themeMetrics, getWordSegments);
@@ -255,7 +285,9 @@ function getWrappedContentHeight(
   const actualHeight = emHeight + lineHeight * Math.max(0, lines - 1);
 
   return Math.ceil(
-    actualHeight + themeMetrics.cellVerticalPadding * 2 + EXTRA_WRAPPED_VERTICAL_PADDING,
+    actualHeight +
+      themeMetrics.cellVerticalPadding * 2 +
+      EXTRA_WRAPPED_VERTICAL_PADDING,
   );
 }
 
@@ -342,5 +374,42 @@ export function estimateWrappedRowHeights<T>(params: {
     }
 
     return maxHeight;
+  });
+}
+
+export function estimateWrappedRowHeightsInRange<T>(params: {
+  data: T[];
+  wrappedColumns: Set<string>;
+  columnWidths: Record<string, number>;
+  columnDataTypes: Map<string, DataType>;
+  strategy: Exclude<WrappedRowHeightStrategy, "fixed">;
+  themeMetrics: GlideWrapThemeMetrics;
+  start: number;
+  end: number;
+}): number[] | undefined {
+  const {
+    data,
+    wrappedColumns,
+    columnWidths,
+    columnDataTypes,
+    strategy,
+    themeMetrics,
+    start,
+    end,
+  } = params;
+
+  const boundedStart = Math.max(0, start);
+  const boundedEnd = Math.min(data.length, end);
+  if (boundedStart >= boundedEnd) {
+    return [];
+  }
+
+  return estimateWrappedRowHeights({
+    data: data.slice(boundedStart, boundedEnd),
+    wrappedColumns,
+    columnWidths,
+    columnDataTypes,
+    strategy,
+    themeMetrics,
   });
 }

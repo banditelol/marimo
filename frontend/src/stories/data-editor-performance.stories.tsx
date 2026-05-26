@@ -1,6 +1,13 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
-import { Profiler, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Profiler,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { FieldTypes } from "@/components/data-table/types";
 import { Button } from "@/components/ui/button";
 import { GlideDataEditor } from "@/plugins/impl/data-editor/glide-data-editor";
@@ -35,6 +42,14 @@ type BenchmarkMetrics = {
   maxMs: number;
   wallMs: number;
   completedIterations: number;
+};
+
+type LargeRowStrategy = Exclude<WrappedRowHeightStrategy, "measureText">;
+
+type StrategyEntry = {
+  label: string;
+  strategy: WrappedRowHeightStrategy;
+  description?: string;
 };
 
 const MAX_MULTI_VISUAL_ROWS = 5000;
@@ -81,13 +96,22 @@ const NOTE_VARIANTS = [
   },
 ] as const;
 
-const STRATEGIES: Array<{
-  label: string;
-  strategy: WrappedRowHeightStrategy;
-}> = [
+const STRATEGIES: StrategyEntry[] = [
   { label: "Fixed wrapped height", strategy: "fixed" },
   { label: "Approximate dynamic", strategy: "approx" },
   { label: "Approximate deferred", strategy: "approxDeferred" },
+  {
+    label: "Approximate incremental",
+    strategy: "approxIncremental",
+    description:
+      "Drag the notes column to watch the first batch update live, then the remaining rows fill in after release.",
+  },
+  {
+    label: "Approximate incremental (baseline)",
+    strategy: "approxIncrementalBaseline",
+    description:
+      "Incremental batching without viewport anchoring; computes from the start and expands outward from top rows.",
+  },
   { label: "Canvas measureText", strategy: "measureText" },
   { label: "Pretext", strategy: "pretext" },
 ];
@@ -125,9 +149,10 @@ function makeSyntheticChunk(offset: number, size: number): Row[] {
 
 function runSyntheticSizingBenchmarkForStrategy(
   rowCount: number,
-  selectedStrategy: Exclude<WrappedRowHeightStrategy, "measureText">,
+  selectedStrategy: LargeRowStrategy,
 ): Partial<Record<WrappedRowHeightStrategy, BenchmarkMetrics>> {
-  const results: Partial<Record<WrappedRowHeightStrategy, BenchmarkMetrics>> = {};
+  const results: Partial<Record<WrappedRowHeightStrategy, BenchmarkMetrics>> =
+    {};
   const selectedEntry = STRATEGIES.find(
     ({ strategy }) => strategy === selectedStrategy,
   );
@@ -197,12 +222,12 @@ function PerformanceSummary({
 }) {
   return (
     <div className="rounded-md border bg-muted/30 p-3">
-        <div className="font-medium">Benchmark summary</div>
+      <div className="font-medium">Benchmark summary</div>
       <div className="mt-1 text-sm text-muted-foreground">
         {rows > MAX_SINGLE_VISUAL_ROWS
           ? `Synthetic sizing benchmark with ${rows.toLocaleString()} rows.`
           : `Controlled rerender run with ${rows.toLocaleString()} rows and ${iterations} iterations.`}
-        </div>
+      </div>
       <div className="mt-3 overflow-x-auto">
         <table className="w-full min-w-[720px] text-sm">
           <thead>
@@ -237,7 +262,9 @@ function PerformanceSummary({
                   <td className="py-2 pr-4">
                     {result ? formatMs(result.maxMs) : "-"}
                   </td>
-                  <td className="py-2">{result ? formatMs(result.wallMs) : "-"}</td>
+                  <td className="py-2">
+                    {result ? formatMs(result.wallMs) : "-"}
+                  </td>
                 </tr>
               );
             })}
@@ -251,12 +278,14 @@ function PerformanceSummary({
 function EditorHarness({
   label,
   strategy,
+  description,
   rows,
   benchmarkRun,
   onBenchmarkComplete,
 }: {
   label: string;
   strategy: WrappedRowHeightStrategy;
+  description?: string;
   rows: Row[];
   benchmarkRun: BenchmarkRun;
   onBenchmarkComplete: (
@@ -344,7 +373,11 @@ function EditorHarness({
 
         frameId = requestAnimationFrame(() => {
           const benchmarkState = benchmarkStateRef.current;
-          if (cancelled || !benchmarkState || benchmarkState.runId !== benchmarkRun.id) {
+          if (
+            cancelled ||
+            !benchmarkState ||
+            benchmarkState.runId !== benchmarkRun.id
+          ) {
             return;
           }
 
@@ -364,7 +397,14 @@ function EditorHarness({
       }
       setIsBenchmarkRunning(false);
     };
-  }, [benchmarkRun.id, benchmarkRun.iterations, benchmarkRun.stopId, label, onBenchmarkComplete, strategy]);
+  }, [
+    benchmarkRun.id,
+    benchmarkRun.iterations,
+    benchmarkRun.stopId,
+    label,
+    onBenchmarkComplete,
+    strategy,
+  ]);
 
   return (
     <div className="flex flex-col gap-2 rounded-md border bg-background p-3">
@@ -372,8 +412,13 @@ function EditorHarness({
         <div>
           <div className="font-medium">{label}</div>
           <div className="text-sm text-muted-foreground">
-            commits: {metricsRef.current.commits} | last: {metricsRef.current.lastMs.toFixed(1)} ms | total: {metricsRef.current.totalMs.toFixed(1)} ms
+            commits: {metricsRef.current.commits} | last:{" "}
+            {metricsRef.current.lastMs.toFixed(1)} ms | total:{" "}
+            {metricsRef.current.totalMs.toFixed(1)} ms
           </div>
+          {description ? (
+            <div className="text-xs text-muted-foreground">{description}</div>
+          ) : null}
         </div>
         <div className="text-sm text-muted-foreground">
           {isBenchmarkRunning ? "Benchmark running" : "Idle"}
@@ -393,7 +438,10 @@ function EditorHarness({
           if (benchmarkState && benchmarkState.runId === benchmarkRun.id) {
             benchmarkState.commits += 1;
             benchmarkState.totalMs += actualDuration;
-            benchmarkState.maxMs = Math.max(benchmarkState.maxMs, actualDuration);
+            benchmarkState.maxMs = Math.max(
+              benchmarkState.maxMs,
+              actualDuration,
+            );
           }
         }}
       >
@@ -435,15 +483,16 @@ export const WrapHeightComparison = {
     const isSingleVisualBenchmark =
       rows > MAX_MULTI_VISUAL_ROWS && rows <= MAX_SINGLE_VISUAL_ROWS;
     const isSyntheticBenchmark = rows > MAX_SINGLE_VISUAL_ROWS;
-    const [largeRowStrategy, setLargeRowStrategy] = useState<
-      Exclude<WrappedRowHeightStrategy, "measureText">
-    >("approx");
+    const [largeRowStrategy, setLargeRowStrategy] =
+      useState<LargeRowStrategy>("approx");
     const largeRowStrategyOptions = STRATEGIES.filter(
-      ({ strategy }) => strategy !== "measureText",
+      (entry): entry is StrategyEntry & { strategy: LargeRowStrategy } =>
+        entry.strategy !== "measureText",
     );
-    const activeStrategies = isSyntheticBenchmark || isSingleVisualBenchmark
-      ? STRATEGIES.filter(({ strategy }) => strategy === largeRowStrategy)
-      : STRATEGIES;
+    const activeStrategies =
+      isSyntheticBenchmark || isSingleVisualBenchmark
+        ? STRATEGIES.filter(({ strategy }) => strategy === largeRowStrategy)
+        : STRATEGIES;
 
     useEffect(() => {
       if (!isBenchmarkRunning) {
@@ -460,7 +509,10 @@ export const WrapHeightComparison = {
     }, [activeStrategies, isBenchmarkRunning, results]);
 
     const handleBenchmarkComplete = useCallback(
-      (completedStrategy: WrappedRowHeightStrategy, metrics: BenchmarkMetrics) => {
+      (
+        completedStrategy: WrappedRowHeightStrategy,
+        metrics: BenchmarkMetrics,
+      ) => {
         setResults((prev) => ({
           ...prev,
           [completedStrategy]: metrics,
@@ -496,7 +548,11 @@ export const WrapHeightComparison = {
           <Button size="sm" variant="outline" onClick={() => setIterations(50)}>
             50 iterations
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setIterations(100)}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setIterations(100)}
+          >
             100 iterations
           </Button>
           {isSyntheticBenchmark || isSingleVisualBenchmark
@@ -504,7 +560,9 @@ export const WrapHeightComparison = {
                 <Button
                   key={strategy}
                   size="sm"
-                  variant={largeRowStrategy === strategy ? "default" : "outline"}
+                  variant={
+                    largeRowStrategy === strategy ? "default" : "outline"
+                  }
                   onClick={() => setLargeRowStrategy(strategy)}
                 >
                   {label}
@@ -518,7 +576,10 @@ export const WrapHeightComparison = {
               setResults({});
               if (isSyntheticBenchmark) {
                 setResults(
-                  runSyntheticSizingBenchmarkForStrategy(rows, largeRowStrategy),
+                  runSyntheticSizingBenchmarkForStrategy(
+                    rows,
+                    largeRowStrategy,
+                  ),
                 );
                 setIsBenchmarkRunning(false);
                 return;
@@ -550,7 +611,8 @@ export const WrapHeightComparison = {
           </Button>
           <div className="text-sm text-muted-foreground">
             Compare rerender cost and visual density across fixed, approximate,
-            canvas-measured, and pretext-based wrapped row sizing.
+            deferred, incremental, canvas-measured, and pretext-based wrapped
+            row sizing.
           </div>
         </div>
         <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
@@ -559,12 +621,18 @@ export const WrapHeightComparison = {
           text. Use larger row counts with repeated benchmark runs to make the
           strategy differences more obvious.
         </div>
+        <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+          For `Approximate incremental`, drag the wrapped `notes` column
+          narrower or wider. The first visible batch should update during the
+          drag, while the rest of the rows continue filling in after you
+          release.
+        </div>
         {isSyntheticBenchmark ? (
           <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
             Large row presets use a synthetic wrap-sizing benchmark instead of
-            benchmarking the rendered table directly. Storybook still renders the
-            full {rows.toLocaleString()} rows for the selected strategy while the
-            benchmark measures the same row count synthetically.
+            benchmarking the rendered table directly. Storybook still renders
+            the full {rows.toLocaleString()} rows for the selected strategy
+            while the benchmark measures the same row count synthetically.
           </div>
         ) : null}
         <PerformanceSummary
@@ -575,11 +643,12 @@ export const WrapHeightComparison = {
         />
         {!isSyntheticBenchmark && !isSingleVisualBenchmark ? (
           <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-4">
-            {STRATEGIES.map(({ label, strategy }) => (
+            {STRATEGIES.map(({ label, strategy, description }) => (
               <EditorHarness
                 key={strategy}
                 label={label}
                 strategy={strategy}
+                description={description}
                 rows={data}
                 benchmarkRun={benchmarkRun}
                 onBenchmarkComplete={handleBenchmarkComplete}
@@ -589,34 +658,36 @@ export const WrapHeightComparison = {
         ) : null}
         {isSingleVisualBenchmark ? (
           <div className="grid gap-4">
-            {STRATEGIES.filter(({ strategy }) => strategy === largeRowStrategy).map(
-              ({ label, strategy }) => (
-                <EditorHarness
-                  key={strategy}
-                  label={label}
-                  strategy={strategy}
-                  rows={data}
-                  benchmarkRun={benchmarkRun}
-                  onBenchmarkComplete={handleBenchmarkComplete}
-                />
-              ),
-            )}
+            {STRATEGIES.filter(
+              ({ strategy }) => strategy === largeRowStrategy,
+            ).map(({ label, strategy, description }) => (
+              <EditorHarness
+                key={strategy}
+                label={label}
+                strategy={strategy}
+                description={description}
+                rows={data}
+                benchmarkRun={benchmarkRun}
+                onBenchmarkComplete={handleBenchmarkComplete}
+              />
+            ))}
           </div>
         ) : null}
         {isSyntheticBenchmark ? (
           <div className="grid gap-4">
-            {STRATEGIES.filter(({ strategy }) => strategy === largeRowStrategy).map(
-              ({ label, strategy }) => (
-                <EditorHarness
-                  key={strategy}
-                  label={`${label} (${rows.toLocaleString()} rows)`}
-                  strategy={strategy}
-                  rows={data}
-                  benchmarkRun={{ id: 0, iterations, stopId: 0 }}
-                  onBenchmarkComplete={handleBenchmarkComplete}
-                />
-              ),
-            )}
+            {STRATEGIES.filter(
+              ({ strategy }) => strategy === largeRowStrategy,
+            ).map(({ label, strategy, description }) => (
+              <EditorHarness
+                key={strategy}
+                label={`${label} (${rows.toLocaleString()} rows)`}
+                strategy={strategy}
+                description={description}
+                rows={data}
+                benchmarkRun={{ id: 0, iterations, stopId: 0 }}
+                onBenchmarkComplete={handleBenchmarkComplete}
+              />
+            ))}
           </div>
         ) : null}
       </div>
