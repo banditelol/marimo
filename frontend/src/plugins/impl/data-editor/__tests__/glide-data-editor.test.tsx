@@ -1,10 +1,11 @@
 /* Copyright 2026 Marimo. All rights reserved. */
 
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { forwardRef, useImperativeHandle } from "react";
+import { type ReactNode, forwardRef, useImperativeHandle } from "react";
 import type { FieldTypes } from "@/components/data-table/types";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { GlideDataEditor } from "../glide-data-editor";
+import { DEFAULT_ROW_HEIGHT } from "../wrap-sizing";
 
 beforeAll(() => {
   HTMLCanvasElement.prototype.getContext = vi.fn(
@@ -105,6 +106,43 @@ vi.mock("@/hooks/useNonce", () => ({
 
 vi.mock("@/utils/copy", () => ({
   copyToClipboard: vi.fn(),
+}));
+
+vi.mock("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => children,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => children,
+  DropdownMenuItem: ({
+    children,
+    onClick,
+  }: {
+    children: ReactNode;
+    onClick?: () => void;
+  }) => (
+    <button type="button" onClick={onClick}>
+      {children}
+    </button>
+  ),
+  DropdownMenuSeparator: () => null,
+}));
+
+vi.mock("@/components/ui/button", () => ({
+  Button: ({
+    children,
+    onClick,
+    disabled,
+  }: {
+    children: ReactNode;
+    onClick?: () => void;
+    disabled?: boolean;
+  }) => (
+    <button type="button" onClick={onClick} disabled={disabled}>
+      {children}
+    </button>
+  ),
+}));
+
+vi.mock("@/components/editor/boundary/ErrorBoundary", () => ({
+  ErrorBoundary: ({ children }: { children: ReactNode }) => children,
 }));
 
 vi.mock("@/components/ui/use-toast", () => ({
@@ -257,8 +295,11 @@ describe("GlideDataEditor", () => {
   });
 
   function getRowHeight(rowIndex: number): number {
-    return typeof latestDataEditorProps?.rowHeight === "function"
-      ? latestDataEditorProps.rowHeight(rowIndex)
+    if (typeof latestDataEditorProps?.rowHeight === "function") {
+      return latestDataEditorProps.rowHeight(rowIndex);
+    }
+    return typeof latestDataEditorProps?.rowHeight === "number"
+      ? latestDataEditorProps.rowHeight
       : 0;
   }
 
@@ -286,6 +327,59 @@ describe("GlideDataEditor", () => {
           : "short",
     }));
   }
+
+  it("samples the visible window and applies one max height to all rows", () => {
+    const data = Array.from({ length: 220 }, (_, index) => ({
+      notes:
+        index === 0
+          ? "This row is intentionally much much much much much much much much much much much much much longer than the visible sample so it should not control the visible-all height after scrolling away from it. ".repeat(
+              4,
+            )
+          : index === 120
+            ? "This row is long enough to wrap, but shorter than the row at the top so it should become the sampled max near the current viewport. ".repeat(
+                2,
+              )
+            : "short",
+    }));
+
+    const { rerender } = render(
+      <GlideDataEditor
+        {...baseProps}
+        data={data}
+        wrappedColumns={["notes"]}
+        wrappedRowHeightStrategy="approx"
+      />,
+    );
+
+    const tallestOverallHeight = getRowHeight(0);
+    const visibleSampleHeight = getRowHeight(120);
+
+    expect(tallestOverallHeight).toBeGreaterThan(visibleSampleHeight);
+    expect(visibleSampleHeight).toBeGreaterThan(34);
+
+    rerender(
+      <GlideDataEditor
+        {...baseProps}
+        data={data}
+        wrappedColumns={["notes"]}
+        wrappedRowHeightStrategy="approxVisibleAll"
+      />,
+    );
+
+    act(() => {
+      latestDataEditorProps?.onVisibleRegionChanged?.({
+        x: 0,
+        y: 120,
+        width: 1,
+        height: 10,
+      });
+    });
+
+    expect(getRowHeight(0)).toBe(visibleSampleHeight);
+    expect(getRowHeight(120)).toBe(visibleSampleHeight);
+    expect(getRowHeight(180)).toBe(visibleSampleHeight);
+    expect(getRowHeight(data.length)).toBe(DEFAULT_ROW_HEIGHT);
+  });
 
   it("renders baseline approximate incremental heights from the visible window without scroll correction", () => {
     vi.useFakeTimers();

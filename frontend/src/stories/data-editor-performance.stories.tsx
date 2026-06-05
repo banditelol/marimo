@@ -107,6 +107,12 @@ const STRATEGIES: StrategyEntry[] = [
       "Drag the notes column to watch the first batch update live, then the remaining rows fill in after release.",
   },
   {
+    label: "Approximate incremental rough",
+    strategy: "approxIncrementalRough",
+    description:
+      "Anchors to the current viewport like incremental, but samples visible rows plus 20 before and after and applies the sampled max height to all rows.",
+  },
+  {
     label: "Approximate incremental (baseline)",
     strategy: "approxIncrementalBaseline",
     description:
@@ -524,33 +530,65 @@ export const WrapHeightComparison = {
     return (
       <div className="flex flex-col gap-4 p-4">
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => setRows(200)}>
+          <Button
+            size="sm"
+            variant={rows === 200 ? "default" : "outline"}
+            onClick={() => setRows(200)}
+          >
             200 rows
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setRows(1000)}>
+          <Button
+            size="sm"
+            variant={rows === 1000 ? "default" : "outline"}
+            onClick={() => setRows(1000)}
+          >
             1000 rows
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setRows(5000)}>
+          <Button
+            size="sm"
+            variant={rows === 5000 ? "default" : "outline"}
+            onClick={() => setRows(5000)}
+          >
             5000 rows
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setRows(10000)}>
+          <Button
+            size="sm"
+            variant={rows === 10000 ? "default" : "outline"}
+            onClick={() => setRows(10000)}
+          >
             10,000 rows
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setRows(1000000)}>
+          <Button
+            size="sm"
+            variant={rows === 1000000 ? "default" : "outline"}
+            onClick={() => setRows(1000000)}
+          >
             1,000,000 rows
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setRows(10000000)}>
+          <Button
+            size="sm"
+            variant={rows === 10000000 ? "default" : "outline"}
+            onClick={() => setRows(10000000)}
+          >
             10,000,000 rows
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setIterations(20)}>
+          <Button
+            size="sm"
+            variant={iterations === 20 ? "default" : "outline"}
+            onClick={() => setIterations(20)}
+          >
             20 iterations
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setIterations(50)}>
+          <Button
+            size="sm"
+            variant={iterations === 50 ? "default" : "outline"}
+            onClick={() => setIterations(50)}
+          >
             50 iterations
           </Button>
           <Button
             size="sm"
-            variant="outline"
+            variant={iterations === 100 ? "default" : "outline"}
             onClick={() => setIterations(100)}
           >
             100 iterations

@@ -21,7 +21,9 @@ export type WrappedRowHeightStrategy =
   | "approx"
   | "approxDeferred"
   | "approxIncremental"
+  | "approxIncrementalRough"
   | "approxIncrementalBaseline"
+  | "approxVisibleAll"
   | "measureText"
   | "pretext";
 
@@ -263,7 +265,9 @@ function getLineCount(
     case "approx":
     case "approxDeferred":
     case "approxIncremental":
+    case "approxIncrementalRough":
     case "approxIncrementalBaseline":
+    case "approxVisibleAll":
       return getApproximateLineCount(value, width, themeMetrics);
     case "measureText":
       return getMeasuredLineCount(value, width, themeMetrics, getWordSegments);

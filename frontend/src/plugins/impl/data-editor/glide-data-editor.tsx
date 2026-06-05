@@ -131,6 +131,12 @@ export const GlideDataEditor = <T,>({
   const [incrementalRowHeights, setIncrementalRowHeights] = useState<
     number[] | undefined
   >();
+  const [incrementalRoughRowHeight, setIncrementalRoughRowHeight] = useState<
+    number | number[] | undefined
+  >();
+  const [visibleAllRowHeight, setVisibleAllRowHeight] = useState<
+    number | undefined
+  >();
   const [isIncrementalResizeActive, setIsIncrementalResizeActive] =
     useState(false);
   const [visibleRowWindow, setVisibleRowWindow] = useState({ y: 0, height: 0 });
@@ -144,6 +150,7 @@ export const GlideDataEditor = <T,>({
   const nextResizeAnchorSessionIdRef = useRef(0);
   const isIncrementalResizeActiveRef = useRef(false);
   const visibleRowWindowRef = useRef({ y: 0, height: 0 });
+  const selectionBeforeResizeRef = useRef<GridSelection | null>(null);
 
   const wrappedColumnsSet = useMemo(
     () => new Set(wrappedColumnState),
@@ -231,6 +238,14 @@ export const GlideDataEditor = <T,>({
       return incrementalRowHeights;
     }
 
+    if (wrappedRowHeightStrategy === "approxIncrementalRough") {
+      return incrementalRoughRowHeight;
+    }
+
+    if (wrappedRowHeightStrategy === "approxVisibleAll") {
+      return visibleAllRowHeight;
+    }
+
     return estimateWrappedRowHeights({
       data,
       wrappedColumns: wrappedColumnsSet,
@@ -248,7 +263,9 @@ export const GlideDataEditor = <T,>({
     data,
     fittedRowHeights,
     incrementalRowHeights,
+    incrementalRoughRowHeight,
     settledColumnWidths,
+    visibleAllRowHeight,
     wrapThemeMetrics,
     wrappedColumnState.length,
     wrappedColumnsSet,
@@ -264,6 +281,55 @@ export const GlideDataEditor = <T,>({
       return { y: region.y, height: region.height };
     });
   }, []);
+
+  useEffect(() => {
+    if (wrappedRowHeightStrategy !== "approxVisibleAll") {
+      setVisibleAllRowHeight(undefined);
+      return;
+    }
+
+    if (wrappedColumnsSet.size === 0 || data.length === 0) {
+      setVisibleAllRowHeight(undefined);
+      return;
+    }
+
+    const visibleStart = Math.max(0, visibleRowWindow.y);
+    const visibleHeight = Math.max(visibleRowWindow.height, visibleRowEstimate);
+    const visibleEnd = Math.min(data.length, visibleStart + visibleHeight);
+    const sampleStart = Math.max(0, visibleStart - 20);
+    const sampleEnd = Math.min(data.length, visibleEnd + 20);
+    const samplingColumnWidths = isColumnResizeActiveRef.current
+      ? settledColumnWidths
+      : columnWidths;
+
+    const sampledHeights = estimateWrappedRowHeightsInRange({
+      data,
+      wrappedColumns: wrappedColumnsSet,
+      columnWidths: samplingColumnWidths,
+      columnDataTypes,
+      strategy: "approx",
+      themeMetrics: wrapThemeMetrics,
+      start: sampleStart,
+      end: sampleEnd,
+    });
+
+    setVisibleAllRowHeight(
+      sampledHeights && sampledHeights.length > 0
+        ? Math.max(DEFAULT_ROW_HEIGHT, ...sampledHeights)
+        : DEFAULT_ROW_HEIGHT,
+    );
+  }, [
+    columnDataTypes,
+    columnWidths,
+    data,
+    settledColumnWidths,
+    visibleRowEstimate,
+    visibleRowWindow.height,
+    visibleRowWindow.y,
+    wrapThemeMetrics,
+    wrappedColumnsSet,
+    wrappedRowHeightStrategy,
+  ]);
 
   const startResizeAnchorSession = useCallback(() => {
     const currentSession = resizeAnchorSessionRef.current;
@@ -287,10 +353,7 @@ export const GlideDataEditor = <T,>({
     return nextSession;
   }, [data.length]);
 
-  const finishIncrementalResizeSession = useCallback(() => {
-    isIncrementalResizeActiveRef.current = false;
-    setIsIncrementalResizeActive(false);
-
+  const finishResizeAnchorSession = useCallback(() => {
     const currentSession = resizeAnchorSessionRef.current;
     if (currentSession?.phase === "resizing") {
       resizeAnchorSessionRef.current = {
@@ -299,6 +362,13 @@ export const GlideDataEditor = <T,>({
       };
     }
   }, []);
+
+  const finishIncrementalResizeSession = useCallback(() => {
+    isIncrementalResizeActiveRef.current = false;
+    setIsIncrementalResizeActive(false);
+
+    finishResizeAnchorSession();
+  }, [finishResizeAnchorSession]);
 
   const interruptSettlingResizeAnchor = useCallback(() => {
     const currentSession = resizeAnchorSessionRef.current;
@@ -310,8 +380,44 @@ export const GlideDataEditor = <T,>({
     }
   }, []);
 
+  const snapshotSelectionForResize = useCallback(() => {
+    selectionBeforeResizeRef.current =
+      selection.current == null
+        ? null
+        : {
+            ...selection,
+            current: {
+              ...selection.current,
+              cell: [...selection.current.cell] as [number, number],
+              range: { ...selection.current.range },
+              rangeStack: selection.current.rangeStack.map((range) => ({
+                ...range,
+              })),
+            },
+          };
+  }, [selection]);
+
+  const restoreSelectionFocusAfterResize = useCallback(() => {
+    if (selectionBeforeResizeRef.current?.current == null) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      dataEditorRef.current?.focus();
+    });
+  }, []);
+
+  const restoreControlledSelectionAfterResize = useCallback(() => {
+    const selectionBeforeResize = selectionBeforeResizeRef.current;
+    if (selectionBeforeResize?.current == null) {
+      return;
+    }
+
+    setSelection(selectionBeforeResize);
+  }, []);
+
   const scrollResizeAnchorIntoView = useCallback(
-    (sessionId: number, row: number) => {
+    (sessionId: number, row: number, vAlign: "start" | "center" = "start") => {
       window.requestAnimationFrame(() => {
         const currentSession = resizeAnchorSessionRef.current;
         if (
@@ -328,7 +434,7 @@ export const GlideDataEditor = <T,>({
           correctionApplied: true,
         };
         dataEditorRef.current?.scrollTo(0, row, "vertical", 0, 0, {
-          vAlign: "start",
+          vAlign,
         });
         if (resizeAnchorSessionRef.current?.id === sessionId) {
           resizeAnchorSessionRef.current = null;
@@ -340,11 +446,191 @@ export const GlideDataEditor = <T,>({
 
   useEffect(() => {
     if (
+      wrappedRowHeightStrategy === "approxIncremental" ||
+      wrappedRowHeightStrategy === "approxIncrementalRough" ||
+      wrappedRowHeightStrategy === "approxVisibleAll"
+    ) {
+      return;
+    }
+
+    resizeAnchorSessionRef.current = null;
+  }, [wrappedRowHeightStrategy]);
+
+  useEffect(() => {
+    if (wrappedRowHeightStrategy !== "approxIncrementalRough") {
+      setIncrementalRoughRowHeight(undefined);
+      return;
+    }
+
+    if (wrappedColumnsSet.size === 0 || data.length === 0) {
+      setIncrementalRoughRowHeight(undefined);
+      return;
+    }
+
+    const activeResizeSession = resizeAnchorSessionRef.current;
+    const anchorStart = Math.min(
+      Math.max(0, activeResizeSession?.anchorRow ?? visibleRowWindow.y),
+      Math.max(0, data.length - 1),
+    );
+    const visibleHeight = Math.max(1, visibleRowWindow.height || visibleRowEstimate);
+    const sampleStart = Math.max(0, anchorStart - 20);
+    const sampleEnd = Math.min(data.length, anchorStart + visibleHeight + 20);
+
+    const sampledHeights = estimateWrappedRowHeightsInRange({
+      data,
+      wrappedColumns: wrappedColumnsSet,
+      columnWidths,
+      columnDataTypes,
+      strategy: "approx",
+      themeMetrics: wrapThemeMetrics,
+      start: sampleStart,
+      end: sampleEnd,
+    });
+
+    const sampledMaxHeight =
+      sampledHeights && sampledHeights.length > 0
+        ? Math.max(DEFAULT_ROW_HEIGHT, ...sampledHeights)
+        : DEFAULT_ROW_HEIGHT;
+
+    if (activeResizeSession?.phase === "resizing") {
+      setIncrementalRoughRowHeight((prev) => {
+        const next = Array.isArray(prev)
+          ? [...prev]
+          : Array.from({ length: data.length }, () => DEFAULT_ROW_HEIGHT);
+
+        for (let index = sampleStart; index < sampleEnd; index += 1) {
+          next[index] = sampledMaxHeight;
+        }
+
+        return next;
+      });
+      return;
+    }
+
+    setIncrementalRoughRowHeight(sampledMaxHeight);
+  }, [
+    columnDataTypes,
+    columnWidths,
+    data,
+    visibleRowEstimate,
+    visibleRowWindow.height,
+    visibleRowWindow.y,
+    wrapThemeMetrics,
+    wrappedColumnsSet,
+    wrappedRowHeightStrategy,
+  ]);
+
+  useEffect(() => {
+    if (wrappedRowHeightStrategy !== "approxIncrementalRough") {
+      return;
+    }
+
+    const currentSession = resizeAnchorSessionRef.current;
+    if (
+      currentSession == null ||
+      incrementalRoughRowHeight == null
+    ) {
+      return;
+    }
+
+    if (currentSession.phase === "resizing") {
+      window.requestAnimationFrame(() => {
+        const latestSession = resizeAnchorSessionRef.current;
+        if (
+          latestSession == null ||
+          latestSession.id !== currentSession.id ||
+          latestSession.phase !== "resizing"
+        ) {
+          return;
+        }
+
+        dataEditorRef.current?.scrollTo(
+          0,
+          latestSession.anchorRow,
+          "vertical",
+          0,
+          0,
+          {
+            vAlign: "start",
+          },
+        );
+      });
+      return;
+    }
+
+    if (
+      currentSession.phase !== "settling" ||
+      currentSession.correctionApplied
+    ) {
+      return;
+    }
+
+    scrollResizeAnchorIntoView(
+      currentSession.id,
+      currentSession.anchorRow,
+      "center",
+    );
+  }, [
+    incrementalRoughRowHeight,
+    scrollResizeAnchorIntoView,
+    wrappedRowHeightStrategy,
+  ]);
+
+  useEffect(() => {
+    if (wrappedRowHeightStrategy !== "approxVisibleAll") {
+      return;
+    }
+
+    const currentSession = resizeAnchorSessionRef.current;
+    if (
+      currentSession == null ||
+      currentSession.phase !== "settling" ||
+      currentSession.correctionApplied ||
+      visibleAllRowHeight == null
+    ) {
+      return;
+    }
+
+    const { id, anchorRow } = currentSession;
+    const restoreRow =
+      selectionBeforeResizeRef.current?.current?.cell[1] ?? anchorRow;
+    window.requestAnimationFrame(() => {
+      const latestSession = resizeAnchorSessionRef.current;
+      if (
+        latestSession == null ||
+        latestSession.id !== id ||
+        latestSession.phase !== "settling" ||
+        latestSession.correctionApplied
+      ) {
+        return;
+      }
+
+      resizeAnchorSessionRef.current = {
+        ...latestSession,
+        correctionApplied: true,
+      };
+      restoreControlledSelectionAfterResize();
+      dataEditorRef.current?.scrollTo(0, restoreRow, "vertical", 0, 0, {
+        vAlign: "start",
+      });
+      dataEditorRef.current?.focus();
+      if (resizeAnchorSessionRef.current?.id === id) {
+        resizeAnchorSessionRef.current = null;
+        selectionBeforeResizeRef.current = null;
+      }
+    });
+  }, [
+    restoreControlledSelectionAfterResize,
+    visibleAllRowHeight,
+    wrappedRowHeightStrategy,
+  ]);
+
+  useEffect(() => {
+    if (
       wrappedRowHeightStrategy !== "approxIncremental" &&
       wrappedRowHeightStrategy !== "approxIncrementalBaseline"
     ) {
       setIncrementalRowHeights(undefined);
-      resizeAnchorSessionRef.current = null;
       return;
     }
 
@@ -507,12 +793,19 @@ export const GlideDataEditor = <T,>({
         ...pendingResizeWidthsRef.current,
       }));
       pendingResizeWidthsRef.current = {};
+
+      if (wrappedRowHeightStrategy === "approxVisibleAll") {
+        finishResizeAnchorSession();
+        restoreSelectionFocusAfterResize();
+      }
     };
 
     const handlePointerRelease = () => {
       if (
         wrappedRowHeightStrategy !== "approxDeferred" &&
+        wrappedRowHeightStrategy !== "approxVisibleAll" &&
         wrappedRowHeightStrategy !== "approxIncremental" &&
+        wrappedRowHeightStrategy !== "approxIncrementalRough" &&
         wrappedRowHeightStrategy !== "approxIncrementalBaseline"
       ) {
         return;
@@ -530,7 +823,12 @@ export const GlideDataEditor = <T,>({
         window.clearTimeout(resizeCommitTimeoutRef.current);
       }
     };
-  }, [finishIncrementalResizeSession, wrappedRowHeightStrategy]);
+  }, [
+    finishIncrementalResizeSession,
+    finishResizeAnchorSession,
+    restoreSelectionFocusAfterResize,
+    wrappedRowHeightStrategy,
+  ]);
 
   // Apply initial edits after data has loaded
   useEffect(() => {
@@ -715,7 +1013,14 @@ export const GlideDataEditor = <T,>({
         [column.title]: nextSize,
       }));
 
-      if (wrappedRowHeightStrategy === "approxDeferred") {
+      if (
+        wrappedRowHeightStrategy === "approxDeferred" ||
+        wrappedRowHeightStrategy === "approxVisibleAll"
+      ) {
+        if (wrappedRowHeightStrategy === "approxVisibleAll") {
+          snapshotSelectionForResize();
+          startResizeAnchorSession();
+        }
         isColumnResizeActiveRef.current = true;
         pendingResizeWidthsRef.current = {
           ...pendingResizeWidthsRef.current,
@@ -728,17 +1033,39 @@ export const GlideDataEditor = <T,>({
 
         resizeCommitTimeoutRef.current = window.setTimeout(() => {
           isColumnResizeActiveRef.current = false;
+          if (wrappedRowHeightStrategy === "approxVisibleAll") {
+            finishResizeAnchorSession();
+          }
           setSettledColumnWidths((prev) => ({
             ...prev,
             ...pendingResizeWidthsRef.current,
           }));
           pendingResizeWidthsRef.current = {};
           resizeCommitTimeoutRef.current = null;
+          if (wrappedRowHeightStrategy === "approxVisibleAll") {
+            restoreSelectionFocusAfterResize();
+          }
         }, 400);
         return;
       }
 
       if (wrappedRowHeightStrategy === "approxIncremental") {
+        startResizeAnchorSession();
+        isIncrementalResizeActiveRef.current = true;
+        setIsIncrementalResizeActive(true);
+
+        if (resizeCommitTimeoutRef.current != null) {
+          window.clearTimeout(resizeCommitTimeoutRef.current);
+        }
+
+        resizeCommitTimeoutRef.current = window.setTimeout(() => {
+          finishIncrementalResizeSession();
+          resizeCommitTimeoutRef.current = null;
+        }, 400);
+        return;
+      }
+
+      if (wrappedRowHeightStrategy === "approxIncrementalRough") {
         startResizeAnchorSession();
         isIncrementalResizeActiveRef.current = true;
         setIsIncrementalResizeActive(true);
@@ -776,6 +1103,9 @@ export const GlideDataEditor = <T,>({
     },
     [
       finishIncrementalResizeSession,
+      finishResizeAnchorSession,
+      restoreSelectionFocusAfterResize,
+      snapshotSelectionForResize,
       startResizeAnchorSession,
       wrappedColumnsSet,
       wrappedRowHeightStrategy,
@@ -1198,8 +1528,14 @@ export const GlideDataEditor = <T,>({
           height={data.length > 10 ? 450 : undefined}
           rowHeight={
             Array.isArray(rowHeights)
-              ? (index: number) => rowHeights[index] ?? FIXED_WRAPPED_ROW_HEIGHT
-              : rowHeights
+              ? (index: number) =>
+                  index >= data.length
+                    ? DEFAULT_ROW_HEIGHT
+                    : (rowHeights[index] ?? FIXED_WRAPPED_ROW_HEIGHT)
+              : typeof rowHeights === "number"
+                ? (index: number) =>
+                    index >= data.length ? DEFAULT_ROW_HEIGHT : rowHeights
+                : rowHeights
           }
           width={"100%"}
           rowMarkers={{
