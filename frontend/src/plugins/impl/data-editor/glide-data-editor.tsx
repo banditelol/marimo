@@ -47,12 +47,26 @@ import {
   type Edits,
   type ModifiedGridColumn,
 } from "./types";
+import {
+  DEFAULT_WRAP_COLUMN_WIDTH,
+  type RoughRowHeights,
+  expandVisibleRowWindow,
+  getRowHeight,
+  getVisibleRowWindow,
+  measureRoughWrappedRowHeight,
+  type VisibleRowWindow,
+  type WrappedRowHeightStrategy,
+} from "./wrap-sizing";
 
 interface GlideDataEditorProps {
   data: EditorRow[];
   columnFields: FieldTypes;
   editableColumns: string[] | "all";
   onAddEdits: (edits: Edits["edits"]) => void;
+  /** Columns whose text cells should wrap. */
+  wrappedColumns?: string[];
+  /** Strategy used to estimate wrapped row heights while a column is resized. */
+  wrappedRowHeightStrategy?: WrappedRowHeightStrategy;
 }
 
 export const GlideDataEditor = ({
@@ -60,6 +74,8 @@ export const GlideDataEditor = ({
   columnFields,
   editableColumns,
   onAddEdits,
+  wrappedColumns = [],
+  wrappedRowHeightStrategy = "fixed",
 }: GlideDataEditorProps) => {
   const { theme } = useTheme();
   const dataEditorRef = useRef<DataEditorRef>(null);
@@ -73,6 +89,12 @@ export const GlideDataEditor = ({
   });
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [roughRowHeights, setRoughRowHeights] = useState<RoughRowHeights>();
+  const visibleRowWindowRef = useRef<VisibleRowWindow>({ start: 0, end: 0 });
+  const wrappedColumnsSet = useMemo(() => new Set(wrappedColumns), [wrappedColumns]);
+  const usesRoughWrappedHeights =
+    wrappedRowHeightStrategy === "approxIncrementalRough" &&
+    wrappedColumnsSet.size > 0;
 
   const columns: ModifiedGridColumn[] = useMemo(() => {
     const columns: ModifiedGridColumn[] = [];
@@ -136,12 +158,13 @@ export const GlideDataEditor = ({
       return {
         kind: GridCellKind.Text,
         allowOverlay: editable,
+        allowWrapping: wrappedColumnsSet.has(columns[col].title),
         readonly: !editable,
         displayData: String(dataItem),
         data: String(dataItem),
       };
     },
-    [columns, data, editableColumns],
+    [columns, data, editableColumns, wrappedColumnsSet],
   );
 
   const onCellEdited = useCallback(
@@ -164,12 +187,43 @@ export const GlideDataEditor = ({
     [columns, onAddEdits],
   );
 
-  const onColumnResize = useCallback((column: GridColumn, newSize: number) => {
-    setColumnWidths((prev) => ({
-      ...prev,
-      [column.title]: newSize,
-    }));
+  const onColumnResize = useCallback(
+    (column: GridColumn, newSize: number) => {
+      const nextColumnWidths = { ...columnWidths, [column.title]: newSize };
+      setColumnWidths(nextColumnWidths);
+
+      if (!usesRoughWrappedHeights || !wrappedColumnsSet.has(column.title)) {
+        return;
+      }
+
+      const sampleWindow = expandVisibleRowWindow(
+        visibleRowWindowRef.current,
+        data.length,
+      );
+      const { sampledHeight } = measureRoughWrappedRowHeight({
+        columns,
+        data,
+        getColumnWidth: (columnTitle) =>
+          nextColumnWidths[columnTitle] ?? DEFAULT_WRAP_COLUMN_WIDTH,
+        sampleWindow,
+        wrappedColumns: wrappedColumnsSet,
+      });
+      setRoughRowHeights({
+        mode: "all",
+        height: sampledHeight,
+      });
+    },
+    [columnWidths, columns, data, usesRoughWrappedHeights, wrappedColumnsSet],
+  );
+
+  const onVisibleRegionChanged = useCallback((range: Rectangle) => {
+    visibleRowWindowRef.current = getVisibleRowWindow(range);
   }, []);
+
+  const rowHeight = useCallback(
+    (row: number) => getRowHeight(row, data.length, roughRowHeights),
+    [data.length, roughRowHeights],
+  );
 
   // Only called when user edits a cell, not deletes
   const validateCell = useCallback(
@@ -463,6 +517,8 @@ export const GlideDataEditor = ({
           rowSelectionMode={"multi"}
           onCellEdited={onCellEdited}
           onColumnResize={onColumnResize}
+          onVisibleRegionChanged={onVisibleRegionChanged}
+          rowHeight={rowHeight}
           onHeaderMenuClick={onHeaderMenuClick}
           theme={getGlideTheme(theme)}
           trailingRowOptions={trailingRowOptions}
