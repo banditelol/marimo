@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.6"
+__generated_with = "0.10.13"
 app = marimo.App(width="medium")
 
 
@@ -13,21 +13,21 @@ def _():
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""
-    # Convert gifs to webm format
-    """)
+    mo.md(r"""# Convert gifs to webm format""")
     return
 
 
 @app.cell
 def _(mo):
-    mo.md("""
-    You can either use the UI below or run:
+    mo.md(
+        """
+        You can either use the UI below or run:
 
-    ```bash
-    python convert_gif_to_webm.py -- --folder /path/to/folder
-    ```
-    """)
+        ```bash
+        python convert_gif_to_webm.py -- --folder /path/to/folder
+        ```
+        """
+    )
     return
 
 
@@ -135,7 +135,7 @@ def _(gifs, mo):
 
 
 @app.cell
-def _(convert_gif_to_webm, force, gifs, mo, run_selection):
+def _(convert_gif_to_webm, gifs, mo, run_selection, force):
     if run_selection.value:
         with mo.status.spinner("Converting GIFs to WebM..."):
             convert_gif_to_webm(gifs, force=force.value)
@@ -156,7 +156,7 @@ def _(convert_gif_to_webm, get_gifs_from_folder, mo, os):
         raise Exception("Specified folder does not exist!")
     else:
         convert_gif_to_webm(get_gifs_from_folder(folder_path), force=_force)
-    return
+    return folder_path
 
 
 if __name__ == "__main__":
